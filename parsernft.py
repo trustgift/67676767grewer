@@ -33,24 +33,7 @@ from telethon.tl.types import PeerUser
 
 
 # ============================================================
-# CONFIG — ВСЁ В ОДНОМ ФАЙЛЕ
-# ============================================================
-#
-# Здесь больше НЕ нужен .env.
-# Заполни только 4 обязательных значения:
-#
-# 1) API_ID и API_HASH:
-#    https://my.telegram.org -> API development tools
-#
-# 2) BOT_TOKEN:
-#    @BotFather -> /newbot
-#
-# 3) ADMIN_ID:
-#    твой Telegram user ID.
-#
-# Остальные настройки можно менять прямо здесь или через меню бота.
-# Реальные секреты я не могу угадать: в исходном файле их не было,
-# там стояли только placeholders / переменные окружения.
+# CONFIG
 # ============================================================
 
 API_ID = 26259835
@@ -58,51 +41,21 @@ API_HASH = "3fa32264398920f001dd2428b42060f6"
 BOT_TOKEN = "8206373294:AAEeZp8zrOquQeWrPHL7SJ4nG-mp3nfivrI"
 ADMIN_ID = 8986358602
 
-# Название локальной Telethon-сессии.
-# После первого входа рядом со скриптом появится .session-файл.
 SESSION_NAME = "telethon_market_userbot"
 
-# Если хочешь сразу отправлять сообщения в конкретную группу,
-# можно указать её numeric chat ID. 0 = настроить через /set_target_chat.
 TARGET_CHAT_ID = -1003660453372
 
-# Как часто проверять маркет (секунды).
-# Пауза между ПОЛНЫМИ проходами всех выбранных моделей.
-# Сам монитор дополнительно выдерживает безопасную паузу между API-запросами.
 MONITOR_INTERVAL = 15
-
-# Сколько лотов брать за один запрос для каждой модели.
-# Для мониторинга достаточно небольшой первой страницы.
 MONITOR_PAGE_LIMIT = 10
-
-# ВАЖНО: не делаем параллельные GetResaleStarGiftsRequest.
-# Telegram гораздо лучше переносит ровную очередь запросов, чем 3-10
-# одновременных запросов, которые затем дают FloodWait.
 REQUEST_CONCURRENCY = 1
-
-# Минимальная пауза между запросами к marketplace API.
-# 1.10 сек = примерно 54 запроса/мин максимум.
-# При FloodWait монитор дополнительно автоматически замедляется.
 MONITOR_API_DELAY = 1.10
-
-# Небольшая пауза между отправками сообщений в группу.
 MONITOR_SEND_DELAY = 0.35
-
-# Максимум уведомлений за один проход. 0 = без ограничения.
 MONITOR_MAX_SEND_PER_CYCLE = 0
 
-# Начальные фильтры цены. 0 = без ограничения.
 DEFAULT_MIN_PRICE = 0
 DEFAULT_MAX_PRICE = 0
-
-# Фильтр username:
-# "any"      — аккаунты с username и без username
-# "required" — только аккаунты с публичным username
 DEFAULT_USERNAME_MODE = "any"
 
-# Первый запуск мониторинга:
-# False — сначала запоминает уже существующие лоты, чтобы не заспамить группу.
-# True  — сразу отправляет уже найденные подходящие лоты.
 SEND_EXISTING_ON_FIRST_SCAN = False
 
 GIFTS_PER_PAGE = 8
@@ -114,7 +67,7 @@ OWNER_CACHE_FILE = "owner_cache.json"
 SENT_GIFTS_FILE = "sent_gifts.json"
 MONITOR_SETTINGS_FILE = "monitor_settings.json"
 
-# ============================================================
+
 # ============================================================
 # LOGGING / GLOBALS
 # ============================================================
@@ -124,6 +77,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("gift-parser")
+
 
 def validate_config():
     errors = []
@@ -141,6 +95,7 @@ def validate_config():
             "\nОткрой верхнюю секцию CONFIG в этом файле и заполни их."
         )
 
+
 validate_config()
 
 bot = Bot(token=BOT_TOKEN)
@@ -153,9 +108,6 @@ BASE_GIFTS_BY_ID: Dict[int, "BaseGift"] = {}
 OWNERS_BLACKLIST: Dict[str, str] = {}
 OWNER_CACHE: Dict[str, Dict[str, Any]] = {}
 
-# slug -> metadata
-# A slug is the permanent identity of a collectible gift listing.
-# Once sent, it is never sent again.
 SENT_GIFTS: Dict[str, Dict[str, Any]] = {}
 
 MONITOR_SETTINGS: Dict[str, Any] = {
@@ -164,8 +116,6 @@ MONITOR_SETTINGS: Dict[str, Any] = {
     "min_price": DEFAULT_MIN_PRICE,
     "max_price": DEFAULT_MAX_PRICE,
     "username_mode": DEFAULT_USERNAME_MODE,
-    # Empty = NO models selected. The monitor will not scan anything
-    # until the admin explicitly chooses models in the menu.
     "model_ids": [],
 }
 
@@ -176,7 +126,6 @@ monitor_lock = asyncio.Lock()
 market_api_lock = asyncio.Lock()
 last_market_api_request = 0.0
 
-# Manual search state.
 USER_SELECTED_GIFT: Dict[int, int] = {}
 USER_SEARCH_HISTORY: Dict[int, Dict[str, Any]] = {}
 USER_LAST_RESULTS: Dict[int, List["MarketGift"]] = {}
@@ -237,6 +186,10 @@ class AuthState(StatesGroup):
 
 class MonitorPriceState(StatesGroup):
     waiting_range = State()
+
+
+class BlacklistState(StatesGroup):
+    waiting_value = State()
 
 
 # ============================================================
@@ -334,8 +287,6 @@ def load_monitor_settings() -> None:
     else:
         MONITOR_SETTINGS["model_ids"] = []
 
-    # Empty selection is intentionally "monitor nothing".
-    # Never silently convert it to "all models".
     if not MONITOR_SETTINGS["model_ids"]:
         MONITOR_SETTINGS["enabled"] = False
 
@@ -430,9 +381,6 @@ def is_owner_blacklisted(owner: OwnerInfo) -> bool:
 def blacklist_owner(owner: OwnerInfo) -> None:
     display = owner.display
 
-    # Store BOTH stable user ID and current username.
-    # This fixes the old situation where username-based blacklisting
-    # could be inconsistent when the username changes.
     for key in owner_blacklist_keys(owner):
         OWNERS_BLACKLIST[key] = display
 
@@ -677,7 +625,6 @@ async def ensure_models_loaded() -> None:
 # ============================================================
 
 async def pace_market_api() -> None:
-    """Serialize marketplace requests and keep a steady request rate."""
     global last_market_api_request
 
     async with market_api_lock:
@@ -719,7 +666,6 @@ async def resolve_owner_info(raw_gift: Any) -> OwnerInfo:
         try:
             await ensure_user_client_connected()
 
-            # Owner lookup also consumes Telegram API quota.
             await pace_market_api()
             entity = await user_client.get_entity(owner_id)
 
@@ -808,15 +754,8 @@ async def get_resale_page(
 ):
     while True:
         try:
-            # One global queue for marketplace requests.
             await pace_market_api()
 
-            # Important:
-            # sort_by_price=False and sort_by_num=False means Telegram
-            # sorts by the Unix time when the resale price was last changed.
-            #
-            # stars_only=True restricts the results to purchases using Stars.
-            # for_craft=False excludes craft-specific results.
             try:
                 return await user_client(
                     functions.payments.GetResaleStarGiftsRequest(
@@ -831,7 +770,6 @@ async def get_resale_page(
                 )
 
             except TypeError as e:
-                # Compatibility with older Telethon versions.
                 if (
                     "stars_only" in str(e)
                     or "for_craft" in str(e)
@@ -953,8 +891,6 @@ async def get_monitor_models() -> List[BaseGift]:
 
     selected = {safe_int(x, 0) for x in (MONITOR_SETTINGS.get("model_ids") or [])}
 
-    # IMPORTANT: empty selection means NOTHING is monitored.
-    # The admin must explicitly choose models in the monitor menu.
     if not selected:
         return []
 
@@ -1040,7 +976,6 @@ async def process_monitor_model(
             gift_id=base_gift.gift_id,
             offset="",
             limit=MONITOR_PAGE_LIMIT,
-            # False is intentional: see Telegram API docs.
             sort_by_price=False,
         )
 
@@ -1054,8 +989,6 @@ async def process_monitor_model(
 
             slug = str(slug)
 
-            # Permanent de-duplication:
-            # once a slug has been sent, it will never be sent again.
             if slug in SENT_GIFTS:
                 continue
 
@@ -1085,8 +1018,6 @@ async def process_monitor_model(
                 owner=owner,
             )
 
-            # First scan can either send existing offers or just create
-            # a baseline. This is controlled by configuration.
             if first_scan and not SEND_EXISTING_ON_FIRST_SCAN:
                 SENT_GIFTS[slug] = {
                     "title": market_gift.title,
@@ -1104,7 +1035,6 @@ async def process_monitor_model(
             if sent:
                 await asyncio.sleep(MONITOR_SEND_DELAY)
 
-                # Only mark as sent AFTER Telegram accepted the message.
                 SENT_GIFTS[slug] = {
                     "title": market_gift.title,
                     "price": market_gift.price,
@@ -1141,9 +1071,6 @@ async def monitor_cycle(first_scan: bool = False) -> int:
             log.info("Monitor: no models selected. Waiting for admin selection.")
             return 0
 
-        # Do NOT run one worker per model. With 100+ models that creates
-        # a burst of GetResaleStarGiftsRequest calls and causes FloodWait.
-        # Process models in one predictable queue instead.
         total_sent = 0
 
         for index, model in enumerate(models, 1):
@@ -1167,8 +1094,6 @@ async def monitor_cycle(first_scan: bool = False) -> int:
                         sent,
                     )
 
-                # Keep a tiny explicit pause even though pace_market_api()
-                # already spaces marketplace requests.
                 await asyncio.sleep(0.05)
 
             except asyncio.CancelledError:
@@ -1223,8 +1148,6 @@ async def monitor_loop() -> None:
                     sent,
                 )
 
-            # MONITOR_INTERVAL is an extra pause AFTER the full model queue.
-            # This prevents a new burst immediately after the previous pass.
             await asyncio.sleep(max(5, MONITOR_INTERVAL))
 
     except asyncio.CancelledError:
@@ -1481,6 +1404,12 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="➕ ДОБАВИТЬ СЕССИЮ",
                     callback_data="add_session_btn",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 БЛОКИРОВКА ЮЗЕРОВ",
+                    callback_data="blacklist",
                 )
             ],
             [
@@ -1843,7 +1772,7 @@ async def monitor_models_callback(
         + "\n\n"
         "Нажимай на модели — ✅ = парсим, ⬜ = не парсим.",
         parse_mode="HTML",
-        reply_markup=monitor_models_keyboard(),
+        reply_markup=monitor_models_keyboard(0),
     )
     await callback.answer()
 
@@ -1868,8 +1797,7 @@ def monitor_models_keyboard(
                 InlineKeyboardButton(
                     text=f"{mark} {gift.title}"[:64],
                     callback_data=(
-                        f"toggle_monitor_model:"
-                        f"{gift.gift_id}"
+                        f"toggle_monitor_model:{page}:{gift.gift_id}"
                     ),
                 )
             ]
@@ -1904,11 +1832,11 @@ def monitor_models_keyboard(
         [
             InlineKeyboardButton(
                 text="✅ ВЫБРАТЬ ВСЕ",
-                callback_data="monitor_models_all",
+                callback_data=f"monitor_models_all:{page}",
             ),
             InlineKeyboardButton(
                 text="⬜ СБРОСИТЬ ВСЕ",
-                callback_data="monitor_models_none",
+                callback_data=f"monitor_models_none:{page}",
             ),
         ]
     )
@@ -1942,8 +1870,17 @@ async def monitor_models_page_callback(
 
     page = int(callback.data.split(":")[1])
 
+    selected = MONITOR_SETTINGS.get("model_ids") or []
+
     await callback.message.edit_text(
         "🎁 <b>МОДЕЛИ МОНИТОРИНГА</b>\n\n"
+        "Сейчас: "
+        + (
+            "⚠️ ничего не выбрано"
+            if not selected
+            else f"{len(selected)} выбранных"
+        )
+        + "\n\n"
         "Нажми на модель, чтобы включить/выключить её.",
         parse_mode="HTML",
         reply_markup=monitor_models_keyboard(page),
@@ -1964,9 +1901,24 @@ async def toggle_monitor_model_callback(
         )
         return
 
-    gift_id = int(
-        callback.data.split(":")[1]
-    )
+    parts = callback.data.split(":")
+
+    if len(parts) != 3:
+        await callback.answer(
+            "Кнопка устарела, открой меню заново.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        page = int(parts[1])
+        gift_id = int(parts[2])
+    except ValueError:
+        await callback.answer(
+            "Некорректные данные.",
+            show_alert=True,
+        )
+        return
 
     selected = set(
         MONITOR_SETTINGS.get("model_ids") or []
@@ -1982,13 +1934,27 @@ async def toggle_monitor_model_callback(
     MONITOR_SETTINGS["model_ids"] = sorted(selected)
     save_monitor_settings()
 
-    await callback.message.edit_reply_markup(
-        reply_markup=monitor_models_keyboard()
+    header = (
+        "🎁 <b>МОДЕЛИ МОНИТОРИНГА</b>\n\n"
+        f"Сейчас: {len(selected)} выбрано\n\n"
+        "Нажимай на модели — ✅ = парсим, ⬜ = не парсим."
     )
+
+    try:
+        await callback.message.edit_text(
+            header,
+            parse_mode="HTML",
+            reply_markup=monitor_models_keyboard(page),
+        )
+    except Exception:
+        pass
+
     await callback.answer(text)
 
 
-@dp.callback_query(F.data == "monitor_models_all")
+@dp.callback_query(
+    F.data.startswith("monitor_models_all")
+)
 async def monitor_models_all_callback(
     callback: CallbackQuery,
 ):
@@ -1999,6 +1965,13 @@ async def monitor_models_all_callback(
         )
         return
 
+    page = 0
+    if ":" in callback.data:
+        try:
+            page = int(callback.data.split(":")[1])
+        except ValueError:
+            page = 0
+
     MONITOR_SETTINGS["model_ids"] = [gift.gift_id for gift in BASE_GIFTS]
     save_monitor_settings()
 
@@ -2007,12 +1980,14 @@ async def monitor_models_all_callback(
         f"Выбраны <b>все {len(BASE_GIFTS)}</b> модели.\n\n"
         "Если нужно меньше — просто нажми на ненужные модели.",
         parse_mode="HTML",
-        reply_markup=monitor_models_keyboard(),
+        reply_markup=monitor_models_keyboard(page),
     )
     await callback.answer("✅ Выбраны все модели.")
 
 
-@dp.callback_query(F.data == "monitor_models_none")
+@dp.callback_query(
+    F.data.startswith("monitor_models_none")
+)
 async def monitor_models_none_callback(
     callback: CallbackQuery,
 ):
@@ -2023,6 +1998,13 @@ async def monitor_models_none_callback(
         )
         return
 
+    page = 0
+    if ":" in callback.data:
+        try:
+            page = int(callback.data.split(":")[1])
+        except ValueError:
+            page = 0
+
     MONITOR_SETTINGS["model_ids"] = []
     MONITOR_SETTINGS["enabled"] = False
     save_monitor_settings()
@@ -2032,7 +2014,7 @@ async def monitor_models_none_callback(
         "⬜ Все модели сняты.\n"
         "Теперь монитор ничего не парсит, пока ты не выберешь модели.",
         parse_mode="HTML",
-        reply_markup=monitor_models_keyboard(),
+        reply_markup=monitor_models_keyboard(page),
     )
     await callback.answer("⬜ Все модели сняты.")
 
@@ -2267,9 +2249,6 @@ def search_results_keyboard(
 ) -> InlineKeyboardMarkup:
     rows = []
 
-    # IMPORTANT:
-    # We put the actual slug in callback data, not an index.
-    # This prevents the old random-owner blacklist bug.
     for gift in results[:10]:
         rows.append(
             [
@@ -2492,39 +2471,47 @@ async def ban_owner_callback(
 async def show_blacklist(
     callback: CallbackQuery,
 ):
-    if not OWNERS_BLACKLIST:
+    items = list(OWNERS_BLACKLIST.items())
+
+    if not items:
         text = "🚫 <b>ЧЁРНЫЙ СПИСОК ПУСТ</b>"
     else:
-        lines = [
-            "🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n"
-        ]
+        text = (
+            f"🚫 <b>ЧЁРНЫЙ СПИСОК</b> ({len(items)})\n\n"
+            "Нажми на запись, чтобы разбанить."
+        )
 
-        for i, (key, label) in enumerate(
-            list(
-                OWNERS_BLACKLIST.items()
-            )[:50],
-            1,
-        ):
-            lines.append(
-                f"{i}. <code>{escape_text(key)}</code>"
-                f" — {escape_text(label)}"
-            )
+    rows = []
 
-        text = "\n".join(lines)
-
-    keyboard = []
-
-    if is_admin(callback.from_user.id):
-        keyboard.append(
+    for key, label in items[:20]:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="🧹 ОЧИСТИТЬ",
+                    text=f"❌ {label}"[:64],
+                    callback_data=f"unban:{key}"[:64],
+                )
+            ]
+        )
+
+    if is_admin(callback.from_user.id):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="➕ ДОБАВИТЬ В ЧС",
+                    callback_data="blacklist_add",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🧹 ОЧИСТИТЬ ВСЁ",
                     callback_data="blacklist_clear",
                 )
             ]
         )
 
-    keyboard.append(
+    rows.append(
         [
             InlineKeyboardButton(
                 text="🏠 ГЛАВНОЕ",
@@ -2533,15 +2520,131 @@ async def show_blacklist(
         ]
     )
 
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=keyboard
-        ),
-    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=rows
+            ),
+        )
+    except Exception:
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=rows
+            ),
+        )
 
     await callback.answer()
+
+
+@dp.callback_query(F.data == "blacklist_add")
+async def blacklist_add(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа.",
+            show_alert=True,
+        )
+        return
+
+    await state.set_state(
+        BlacklistState.waiting_value
+    )
+
+    await callback.message.answer(
+        "🚫 Введи <b>@username</b> или <b>user_id</b>:\n\n"
+        "Примеры:\n"
+        "<code>@durov</code>\n"
+        "<code>123456789</code>\n\n"
+        "❌ /cancel",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.message(BlacklistState.waiting_value)
+async def blacklist_add_value(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_admin(message.from_user.id):
+        return
+
+    raw = (message.text or "").strip()
+
+    if not raw:
+        await message.answer("❌ Пусто.")
+        return
+
+    if raw.startswith("@"):
+        username = raw[1:].lower()
+
+        if not username.replace("_", "").isalnum():
+            await message.answer(
+                "❌ Некорректный username."
+            )
+            return
+
+        key = f"username:{username}"
+        label = f"@{username}"
+    else:
+        digits = raw.lstrip("-")
+
+        if not digits.isdigit():
+            await message.answer(
+                "❌ Нужен @username или числовой user_id."
+            )
+            return
+
+        uid = int(raw)
+        key = f"id:{uid}"
+        label = f"id:{uid}"
+
+    OWNERS_BLACKLIST[key] = label
+    save_owner_blacklist()
+
+    await state.clear()
+
+    await message.answer(
+        f"✅ Добавлено в ЧС: <code>{escape_text(key)}</code>\n"
+        f"Метка: {escape_text(label)}\n\n"
+        "Посмотреть/удалить: /start → 🚫 ЧЁРНЫЙ СПИСОК",
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("unban:"))
+async def unban_callback(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа.",
+            show_alert=True,
+        )
+        return
+
+    key = callback.data.split(":", 1)[1]
+
+    if key in OWNERS_BLACKLIST:
+        OWNERS_BLACKLIST.pop(key, None)
+        save_owner_blacklist()
+        await callback.answer(
+            f"✅ Удалено: {key}",
+            show_alert=True,
+        )
+    else:
+        await callback.answer(
+            "Уже нет в списке.",
+            show_alert=True,
+        )
+
+    await show_blacklist(callback)
 
 
 @dp.callback_query(F.data == "blacklist_clear")
@@ -2785,7 +2888,6 @@ async def check_session_and_alert():
     if not is_auth and not session_alert_sent:
         session_alert_sent = True
 
-        # Stop marketplace monitor if the user session is gone.
         await stop_monitor()
 
         try:
@@ -2909,7 +3011,6 @@ async def main():
                 e,
             )
 
-        # Resume monitor after restart if it was enabled.
         if (
             MONITOR_SETTINGS.get("enabled")
             and get_target_chat_id()
@@ -2939,8 +3040,6 @@ async def main():
         session_monitor()
     )
 
-    # Polling and webhook are mutually exclusive in Telegram Bot API.
-    # Remove any webhook left by a previous deployment before getUpdates.
     try:
         webhook_info = await bot.get_webhook_info()
         if webhook_info.url:
