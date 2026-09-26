@@ -1748,34 +1748,237 @@ async def monitor_price_input(
     )
 
 
-@dp.callback_query(F.data == "monitor_models")
-async def monitor_models_callback(
+# ============================================================
+# BLACKLIST UI (объявлено ДО общего @dp.message())
+# ============================================================
+
+@dp.callback_query(F.data == "blacklist")
+async def show_blacklist(
     callback: CallbackQuery,
+):
+    items = list(OWNERS_BLACKLIST.items())
+
+    if not items:
+        text = "🚫 <b>ЧЁРНЫЙ СПИСОК ПУСТ</b>"
+    else:
+        text = (
+            f"🚫 <b>ЧЁРНЫЙ СПИСОК</b> ({len(items)})\n\n"
+            "Нажми на запись, чтобы разбанить."
+        )
+
+    rows = []
+
+    for key, label in items[:20]:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"❌ {label}"[:64],
+                    callback_data=f"unban:{key}"[:64],
+                )
+            ]
+        )
+
+    if is_admin(callback.from_user.id):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="➕ ДОБАВИТЬ В ЧС",
+                    callback_data="blacklist_add",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🧹 ОЧИСТИТЬ ВСЁ",
+                    callback_data="blacklist_clear",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🏠 ГЛАВНОЕ",
+                callback_data="menu",
+            )
+        ]
+    )
+
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=rows
+            ),
+        )
+    except Exception:
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=rows
+            ),
+        )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "blacklist_add")
+async def blacklist_add(
+    callback: CallbackQuery,
+    state: FSMContext,
 ):
     if not is_admin(callback.from_user.id):
         await callback.answer(
-            "⛔ Только для администратора.",
+            "⛔ Только для админа.",
             show_alert=True,
         )
         return
 
-    selected = MONITOR_SETTINGS.get("model_ids") or []
+    log.info("blacklist_add pressed by %s", callback.from_user.id)
 
-    await callback.message.edit_text(
-        "🎁 <b>МОДЕЛИ МОНИТОРИНГА</b>\n\n"
-        "Сейчас: "
-        + (
-            "⚠️ ничего не выбрано"
-            if not selected
-            else f"{len(selected)} выбранных"
-        )
-        + "\n\n"
-        "Нажимай на модели — ✅ = парсим, ⬜ = не парсим.",
+    await state.set_state(
+        BlacklistState.waiting_value
+    )
+
+    await callback.message.answer(
+        "🚫 Введи <b>@username</b> или <b>user_id</b>:\n\n"
+        "Примеры:\n"
+        "<code>@durov</code>\n"
+        "<code>123456789</code>\n\n"
+        "❌ /cancel",
         parse_mode="HTML",
-        reply_markup=monitor_models_keyboard(0),
     )
     await callback.answer()
 
+
+@dp.message(BlacklistState.waiting_value)
+async def blacklist_add_value(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_admin(message.from_user.id):
+        return
+
+    log.info("blacklist_add_value got: %r", message.text)
+
+    raw = (message.text or "").strip()
+
+    if not raw:
+        await message.answer("❌ Пусто.")
+        return
+
+    if raw.startswith("@"):
+        username = raw[1:].lower()
+
+        if not username.replace("_", "").isalnum():
+            await message.answer(
+                "❌ Некорректный username."
+            )
+            return
+
+        key = f"username:{username}"
+        label = f"@{username}"
+
+        # подтягиваем id из кеша, чтобы монитор точно фильтровал
+        extra_ids = []
+        for cached_id, cached in OWNER_CACHE.items():
+            if str(cached.get("username", "")).lower() == username:
+                extra_ids.append(f"id:{cached_id}")
+
+        OWNERS_BLACKLIST[key] = label
+        for extra in extra_ids:
+            OWNERS_BLACKLIST[extra] = label
+
+        save_owner_blacklist()
+
+        await state.clear()
+        await message.answer(
+            f"✅ Добавлено в ЧС: <code>{escape_text(key)}</code>\n"
+            f"Метка: {escape_text(label)}\n"
+            f"Доп. ключей из кеша: {len(extra_ids)}\n\n"
+            "Посмотреть: /start → 🚫 ЧЁРНЫЙ СПИСОК",
+            parse_mode="HTML",
+        )
+        return
+
+    digits = raw.lstrip("-")
+    if not digits.isdigit():
+        await message.answer(
+            "❌ Нужен @username или числовой user_id."
+        )
+        return
+
+    uid = int(raw)
+    key = f"id:{uid}"
+    label = f"id:{uid}"
+
+    OWNERS_BLACKLIST[key] = label
+    save_owner_blacklist()
+
+    await state.clear()
+    await message.answer(
+        f"✅ Добавлено в ЧС: <code>{escape_text(key)}</code>\n\n"
+        "Посмотреть: /start → 🚫 ЧЁРНЫЙ СПИСОК",
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("unban:"))
+async def unban_callback(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа.",
+            show_alert=True,
+        )
+        return
+
+    key = callback.data.split(":", 1)[1]
+
+    if key in OWNERS_BLACKLIST:
+        OWNERS_BLACKLIST.pop(key, None)
+        save_owner_blacklist()
+        await callback.answer(
+            f"✅ Удалено: {key}",
+            show_alert=True,
+        )
+    else:
+        await callback.answer(
+            "Уже нет в списке.",
+            show_alert=True,
+        )
+
+    await show_blacklist(callback)
+
+
+@dp.callback_query(F.data == "blacklist_clear")
+async def clear_blacklist(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа.",
+            show_alert=True,
+        )
+        return
+
+    OWNERS_BLACKLIST.clear()
+    save_owner_blacklist()
+
+    await callback.answer(
+        "🧹 Чёрный список очищен."
+    )
+
+    await show_blacklist(callback)
+
+
+# ============================================================
+# MONITOR MODELS (пагинация с сохранением страницы)
+# ============================================================
 
 def monitor_models_keyboard(
     page: int = 0,
@@ -1853,6 +2056,35 @@ def monitor_models_keyboard(
     return InlineKeyboardMarkup(
         inline_keyboard=rows
     )
+
+
+@dp.callback_query(F.data == "monitor_models")
+async def monitor_models_callback(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для администратора.",
+            show_alert=True,
+        )
+        return
+
+    selected = MONITOR_SETTINGS.get("model_ids") or []
+
+    await callback.message.edit_text(
+        "🎁 <b>МОДЕЛИ МОНИТОРИНГА</b>\n\n"
+        "Сейчас: "
+        + (
+            "⚠️ ничего не выбрано"
+            if not selected
+            else f"{len(selected)} выбранных"
+        )
+        + "\n\n"
+        "Нажимай на модели — ✅ = парсим, ⬜ = не парсим.",
+        parse_mode="HTML",
+        reply_markup=monitor_models_keyboard(0),
+    )
+    await callback.answer()
 
 
 @dp.callback_query(
@@ -2082,6 +2314,214 @@ async def target_chat(message: Message):
 
 
 # ============================================================
+# ADMIN
+# ============================================================
+
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа."
+        )
+        return
+
+    is_auth = await is_user_client_authorized()
+
+    status = (
+        "✅ АКТИВНА"
+        if is_auth
+        else "❌ НЕ АКТИВНА"
+    )
+
+    me = (
+        await user_client.get_me()
+        if is_auth
+        else None
+    )
+
+    account = (
+        f"{me.first_name} (@{me.username})"
+        if me
+        else "—"
+    )
+
+    await callback.message.edit_text(
+        "⚙️ <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        f"🔐 Сессия: {status}\n"
+        f"👤 Аккаунт: {escape_text(account)}\n"
+        f"📦 Моделей: {len(BASE_GIFTS)}\n"
+        f"🚫 В blacklist: {len(OWNERS_BLACKLIST)}\n"
+        f"📤 Отправлено NFT: {len(SENT_GIFTS)}",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "check_session_admin")
+async def check_session_admin(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа."
+        )
+        return
+
+    is_auth = await is_user_client_authorized()
+
+    if is_auth:
+        try:
+            me = await user_client.get_me()
+            name = me.first_name or "Пользователь"
+            username = (
+                f" (@{me.username})"
+                if me.username
+                else ""
+            )
+
+            await callback.answer(
+                f"✅ Сессия активна\n"
+                f"👤 {name}{username}",
+                show_alert=True,
+            )
+        except Exception:
+            await callback.answer(
+                "✅ Сессия активна.",
+                show_alert=True,
+            )
+    else:
+        await callback.answer(
+            "❌ Сессия не активна.\n"
+            "Используй /add_session",
+            show_alert=True,
+        )
+
+    await admin_panel(callback)
+
+
+@dp.callback_query(F.data == "add_session_btn")
+async def add_session_btn(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа."
+        )
+        return
+
+    await callback.message.answer(
+        "📱 ДОБАВЛЕНИЕ СЕССИИ\n\n"
+        "Введите номер телефона:\n"
+        "Пример: +79991234567\n\n"
+        "❌ /cancel"
+    )
+
+    await state.set_state(
+        AuthState.waiting_phone
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "bot_status")
+async def bot_status_callback(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "⛔ Только для админа."
+        )
+        return
+
+    is_auth = await is_user_client_authorized()
+    me = (
+        await user_client.get_me()
+        if is_auth
+        else None
+    )
+
+    target = get_target_chat_id()
+
+    text = (
+        "📊 <b>СТАТУС БОТА</b>\n\n"
+        f"🤖 Бот: @{escape_text(bot.username or '—')}\n"
+        f"🔐 Сессия: "
+        f"{'✅ АКТИВНА' if is_auth else '❌ НЕ АКТИВНА'}\n"
+        f"📡 Монитор: "
+        f"{'🟢 ON' if MONITOR_SETTINGS.get('enabled') else '🔴 OFF'}\n"
+        f"📢 Группа: <code>{target or 'не задана'}</code>\n"
+        f"📦 Моделей: {len(BASE_GIFTS)}\n"
+        f"🚫 Blacklist: {len(OWNERS_BLACKLIST)}\n"
+        f"📤 Sent: {len(SENT_GIFTS)}"
+    )
+
+    if me:
+        text += (
+            f"\n👤 Аккаунт: "
+            f"{escape_text(me.first_name or '—')}"
+        )
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "reload_models")
+async def reload_models_callback(
+    callback: CallbackQuery,
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(
+            "Только для админа."
+        )
+        return
+
+    await callback.answer(
+        "Обновляю..."
+    )
+
+    await load_base_gifts()
+
+    await callback.message.edit_text(
+        f"✅ <b>Модели обновлены.</b>\n\n"
+        f"📦 Загружено: {len(BASE_GIFTS)}",
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard(
+            callback.from_user.id
+        ),
+    )
+
+
+# ============================================================
+# CANCEL
+# ============================================================
+
+@dp.message(Command("cancel"))
+async def cancel_command(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    USER_SELECTED_GIFT.pop(
+        message.from_user.id,
+        None,
+    )
+
+    await message.answer(
+        "❌ Действие отменено."
+    )
+
+
+# ============================================================
 # MANUAL SEARCH
 # ============================================================
 
@@ -2162,7 +2602,12 @@ async def gift_manual(
 
 
 @dp.message()
-async def price_handler(message: Message):
+async def price_handler(message: Message, state: FSMContext):
+    # не мешаем другим FSM-сценариям (ЧС, цена монитора, авторизация)
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
     user_id = message.from_user.id
 
     if user_id not in USER_SELECTED_GIFT:
@@ -2403,7 +2848,7 @@ async def repeat_search(
 
 
 # ============================================================
-# EXACT OWNER BLACKLIST
+# EXACT OWNER BLACKLIST (из ручного поиска)
 # ============================================================
 
 @dp.callback_query(
@@ -2460,419 +2905,6 @@ async def ban_owner_callback(
     await callback.answer(
         f"✅ Заблокирован {owner.display}",
         show_alert=True,
-    )
-
-
-# ============================================================
-# BLACKLIST UI
-# ============================================================
-
-@dp.callback_query(F.data == "blacklist")
-async def show_blacklist(
-    callback: CallbackQuery,
-):
-    items = list(OWNERS_BLACKLIST.items())
-
-    if not items:
-        text = "🚫 <b>ЧЁРНЫЙ СПИСОК ПУСТ</b>"
-    else:
-        text = (
-            f"🚫 <b>ЧЁРНЫЙ СПИСОК</b> ({len(items)})\n\n"
-            "Нажми на запись, чтобы разбанить."
-        )
-
-    rows = []
-
-    for key, label in items[:20]:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"❌ {label}"[:64],
-                    callback_data=f"unban:{key}"[:64],
-                )
-            ]
-        )
-
-    if is_admin(callback.from_user.id):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="➕ ДОБАВИТЬ В ЧС",
-                    callback_data="blacklist_add",
-                )
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🧹 ОЧИСТИТЬ ВСЁ",
-                    callback_data="blacklist_clear",
-                )
-            ]
-        )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🏠 ГЛАВНОЕ",
-                callback_data="menu",
-            )
-        ]
-    )
-
-    try:
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=rows
-            ),
-        )
-    except Exception:
-        await callback.message.answer(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=rows
-            ),
-        )
-
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "blacklist_add")
-async def blacklist_add(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "⛔ Только для админа.",
-            show_alert=True,
-        )
-        return
-
-    await state.set_state(
-        BlacklistState.waiting_value
-    )
-
-    await callback.message.answer(
-        "🚫 Введи <b>@username</b> или <b>user_id</b>:\n\n"
-        "Примеры:\n"
-        "<code>@durov</code>\n"
-        "<code>123456789</code>\n\n"
-        "❌ /cancel",
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@dp.message(BlacklistState.waiting_value)
-async def blacklist_add_value(
-    message: Message,
-    state: FSMContext,
-):
-    if not is_admin(message.from_user.id):
-        return
-
-    raw = (message.text or "").strip()
-
-    if not raw:
-        await message.answer("❌ Пусто.")
-        return
-
-    if raw.startswith("@"):
-        username = raw[1:].lower()
-
-        if not username.replace("_", "").isalnum():
-            await message.answer(
-                "❌ Некорректный username."
-            )
-            return
-
-        key = f"username:{username}"
-        label = f"@{username}"
-    else:
-        digits = raw.lstrip("-")
-
-        if not digits.isdigit():
-            await message.answer(
-                "❌ Нужен @username или числовой user_id."
-            )
-            return
-
-        uid = int(raw)
-        key = f"id:{uid}"
-        label = f"id:{uid}"
-
-    OWNERS_BLACKLIST[key] = label
-    save_owner_blacklist()
-
-    await state.clear()
-
-    await message.answer(
-        f"✅ Добавлено в ЧС: <code>{escape_text(key)}</code>\n"
-        f"Метка: {escape_text(label)}\n\n"
-        "Посмотреть/удалить: /start → 🚫 ЧЁРНЫЙ СПИСОК",
-        parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data.startswith("unban:"))
-async def unban_callback(
-    callback: CallbackQuery,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "⛔ Только для админа.",
-            show_alert=True,
-        )
-        return
-
-    key = callback.data.split(":", 1)[1]
-
-    if key in OWNERS_BLACKLIST:
-        OWNERS_BLACKLIST.pop(key, None)
-        save_owner_blacklist()
-        await callback.answer(
-            f"✅ Удалено: {key}",
-            show_alert=True,
-        )
-    else:
-        await callback.answer(
-            "Уже нет в списке.",
-            show_alert=True,
-        )
-
-    await show_blacklist(callback)
-
-
-@dp.callback_query(F.data == "blacklist_clear")
-async def clear_blacklist(
-    callback: CallbackQuery,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "⛔ Только для админа.",
-            show_alert=True,
-        )
-        return
-
-    OWNERS_BLACKLIST.clear()
-    save_owner_blacklist()
-
-    await callback.answer(
-        "🧹 Чёрный список очищен."
-    )
-
-    await show_blacklist(callback)
-
-
-# ============================================================
-# ADMIN
-# ============================================================
-
-@dp.callback_query(F.data == "admin_panel")
-async def admin_panel(
-    callback: CallbackQuery,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "⛔ Только для админа."
-        )
-        return
-
-    is_auth = await is_user_client_authorized()
-
-    status = (
-        "✅ АКТИВНА"
-        if is_auth
-        else "❌ НЕ АКТИВНА"
-    )
-
-    me = (
-        await user_client.get_me()
-        if is_auth
-        else None
-    )
-
-    account = (
-        f"{me.first_name} (@{me.username})"
-        if me
-        else "—"
-    )
-
-    await callback.message.edit_text(
-        "⚙️ <b>АДМИН-ПАНЕЛЬ</b>\n\n"
-        f"🔐 Сессия: {status}\n"
-        f"👤 Аккаунт: {escape_text(account)}\n"
-        f"📦 Моделей: {len(BASE_GIFTS)}\n"
-        f"🚫 В blacklist: {len(OWNERS_BLACKLIST)}\n"
-        f"📤 Отправлено NFT: {len(SENT_GIFTS)}",
-        parse_mode="HTML",
-        reply_markup=admin_panel_keyboard(),
-    )
-
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "check_session_admin")
-async def check_session_admin(
-    callback: CallbackQuery,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "⛔ Только для админа."
-        )
-        return
-
-    is_auth = await is_user_client_authorized()
-
-    if is_auth:
-        try:
-            me = await user_client.get_me()
-            name = me.first_name or "Пользователь"
-            username = (
-                f" (@{me.username})"
-                if me.username
-                else ""
-            )
-
-            await callback.answer(
-                f"✅ Сессия активна\n"
-                f"👤 {name}{username}",
-                show_alert=True,
-            )
-        except Exception:
-            await callback.answer(
-                "✅ Сессия активна.",
-                show_alert=True,
-            )
-    else:
-        await callback.answer(
-            "❌ Сессия не активна.\n"
-            "Используй /add_session",
-            show_alert=True,
-        )
-
-    await admin_panel(callback)
-
-
-@dp.callback_query(F.data == "add_session_btn")
-async def add_session_btn(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "⛔ Только для админа."
-        )
-        return
-
-    await callback.message.answer(
-        "📱 ДОБАВЛЕНИЕ СЕССИИ\n\n"
-        "Введите номер телефона:\n"
-        "Пример: +79991234567\n\n"
-        "❌ /cancel"
-    )
-
-    await state.set_state(
-        AuthState.waiting_phone
-    )
-
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "bot_status")
-async def bot_status_callback(
-    callback: CallbackQuery,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "⛔ Только для админа."
-        )
-        return
-
-    is_auth = await is_user_client_authorized()
-    me = (
-        await user_client.get_me()
-        if is_auth
-        else None
-    )
-
-    target = get_target_chat_id()
-
-    text = (
-        "📊 <b>СТАТУС БОТА</b>\n\n"
-        f"🤖 Бот: @{escape_text(bot.username or '—')}\n"
-        f"🔐 Сессия: "
-        f"{'✅ АКТИВНА' if is_auth else '❌ НЕ АКТИВНА'}\n"
-        f"📡 Монитор: "
-        f"{'🟢 ON' if MONITOR_SETTINGS.get('enabled') else '🔴 OFF'}\n"
-        f"📢 Группа: <code>{target or 'не задана'}</code>\n"
-        f"📦 Моделей: {len(BASE_GIFTS)}\n"
-        f"🚫 Blacklist: {len(OWNERS_BLACKLIST)}\n"
-        f"📤 Sent: {len(SENT_GIFTS)}"
-    )
-
-    if me:
-        text += (
-            f"\n👤 Аккаунт: "
-            f"{escape_text(me.first_name or '—')}"
-        )
-
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=admin_panel_keyboard(),
-    )
-
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "reload_models")
-async def reload_models_callback(
-    callback: CallbackQuery,
-):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "Только для админа."
-        )
-        return
-
-    await callback.answer(
-        "Обновляю..."
-    )
-
-    await load_base_gifts()
-
-    await callback.message.edit_text(
-        f"✅ <b>Модели обновлены.</b>\n\n"
-        f"📦 Загружено: {len(BASE_GIFTS)}",
-        parse_mode="HTML",
-        reply_markup=main_menu_keyboard(
-            callback.from_user.id
-        ),
-    )
-
-
-# ============================================================
-# CANCEL
-# ============================================================
-
-@dp.message(Command("cancel"))
-async def cancel_command(
-    message: Message,
-    state: FSMContext,
-):
-    await state.clear()
-    USER_SELECTED_GIFT.pop(
-        message.from_user.id,
-        None,
-    )
-
-    await message.answer(
-        "❌ Действие отменено."
     )
 
 
