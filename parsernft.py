@@ -38,7 +38,7 @@ from telethon.tl.types import PeerUser
 
 API_ID = 26259835
 API_HASH = "3fa32264398920f001dd2428b42060f6"
-BOT_TOKEN = "8206373294:AAEeZp8zrOquQeWrPHL7SJ4nG-mp3nfivrI"
+BOT_TOKEN = ""
 ADMIN_ID = 1602809044
 
 SESSION_NAME = "telethon_market_userbot"
